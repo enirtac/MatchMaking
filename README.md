@@ -160,8 +160,12 @@ dotnet test
 src/
   MatchmakingService.Api/
     Controllers/MatchmakingController.cs
+    Properties/
+      launchSettings.json          — Dev server settings (ports, environment)
     MatchmakingWorker.cs
+    MatchmakingService.Api.http    — HTTP request examples for testing in VS/Rider
     Program.cs
+    appsettings.json               — App configuration
   MatchmakingService.Application/
     Models/
       GameSession.cs
