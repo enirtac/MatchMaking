@@ -6,4 +6,5 @@ obj/
 .idea/
 *.swp
 appsettings.Development.json
-load-results/.DS_Store
+load-results/
+.DS_Store
