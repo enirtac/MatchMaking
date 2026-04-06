@@ -49,13 +49,28 @@ namespace MatchmakingService.Tests.Integration
         }
 
         [Fact(Timeout = 30000)]
-        public async Task Enqueue_InvalidPlayer_ShouldReturnBadRequest()
+        public async Task Enqueue_MissingPlayerId_ShouldReturnBadRequest()
         {
             var response = await PostAsync("/matchmaking/queue", new { playerId = "", latencyMs = 50, gameId = "TestGame" });
 
             response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         }
 
+        [Fact(Timeout = 30000)]
+        public async Task Enqueue_ZeroLatency_ShouldReturnBadRequest()
+        {
+            var response = await PostAsync("/matchmaking/queue", new { playerId = $"lat_{Guid.NewGuid():N}", latencyMs = 0, gameId = "TestGame" });
+
+            response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        }
+
+        [Fact(Timeout = 30000)]
+        public async Task Enqueue_MissingGameId_ShouldReturnBadRequest()
+        {
+            var response = await PostAsync("/matchmaking/queue", new { playerId = $"gid_{Guid.NewGuid():N}", latencyMs = 50, gameId = "" });
+
+            response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        }
         // === Dequeue ===
 
         [Fact(Timeout = 30000)]
@@ -66,7 +81,7 @@ namespace MatchmakingService.Tests.Integration
 
             var response = await _client.DeleteAsync($"/matchmaking/queue/{playerId}");
 
-            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            response.StatusCode.Should().Be(HttpStatusCode.NoContent);
         }
 
         // === Sessions ===
@@ -93,16 +108,25 @@ namespace MatchmakingService.Tests.Integration
             content.Should().Match(c => c.Contains("queued") || c.Contains("joined"));
         }
 
+        [Fact(Timeout = 30000)]
+        public async Task JoinOrQueue_ZeroLatency_ShouldReturnBadRequest()
+        {
+            var response = await PostAsync("/matchmaking/join-or-queue", new { playerId = $"joq_{Guid.NewGuid():N}", latencyMs = 0, gameId = "TestGame" });
+
+            response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        }
+
+
         // === Status ===
 
         [Fact(Timeout = 30000)]
-        public async Task GetPlayerStatus_WhenNeverQueued_ShouldReturnWaiting()
+        public async Task GetPlayerStatus_WhenNeverQueued_ShouldReturnUnknown()
         {
             var response = await _client.GetAsync($"/matchmaking/status/nonexistent_{Guid.NewGuid():N}");
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             var content = await response.Content.ReadAsStringAsync();
-            content.Should().Contain("waiting");
+            content.Should().Contain("unknown");
         }
 
         [Fact(Timeout = 30000)]
@@ -117,8 +141,9 @@ namespace MatchmakingService.Tests.Integration
 
             response.StatusCode.Should().Be(HttpStatusCode.OK);
             var content = await response.Content.ReadAsStringAsync();
-            content.Should().NotContain("waiting");
+            content.Should().NotContain("queued");
         }
+
 
         // === Full matchmaking flow ===
 
@@ -140,7 +165,7 @@ namespace MatchmakingService.Tests.Integration
                 var statusResponse = await _client.GetAsync($"/matchmaking/status/{playerId}");
                 statusResponse.StatusCode.Should().Be(HttpStatusCode.OK);
                 var content = await statusResponse.Content.ReadAsStringAsync();
-                content.Should().NotContain("waiting",
+                content.Should().NotContain("queued",
                     because: $"{playerId} should be in a session after matchmaking");
             }
         }

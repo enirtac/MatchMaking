@@ -5,21 +5,34 @@ REST API for matchmaking in multiplayer games. Players join a queue and get assi
 ## How it works
 
 ```
-Client → REST API → Queue (ConcurrentDictionary)
+Client → REST API → Queue (Dictionary + lock)
                        ↑
-               Background Worker (every 2s)
+               Background Worker (every 500ms)
                        ↓
                  Game Sessions
 ```
 
-Players enter a queue via the API. A background worker runs every 2 seconds, picks players from the queue, scores them based on wait time and latency, and places them into sessions.
+Players enter a queue via the API. A background worker runs every 500ms, groups players by game and latency bracket, sorts them by wait time (oldest first), and places them into sessions.
 
-Sessions go through three states:
+### Latency brackets
+
+Players are grouped so similar latency players play together:
+
+| Bracket | Latency | Quality |
+|---|---|---|
+| 0 | 0–49ms | Very good |
+| 1 | 50–99ms | Good |
+| 2 | 100–149ms | OK |
+| 3 | 150ms+ | Poor |
+
+Within each bracket, players who have waited longest are placed first.
+
+### Session lifecycle
 
 | Status | Players | What happens |
 |---|---|---|
 | `lobby` | 1–3 | Waiting for more players |
-| `started` | 4–9 | Game is running, others can still join |
+| `started` | 4–9 | Game is running, others can still join via `join-or-queue` |
 | `full` | 10 | No more players accepted |
 
 When a session is full, the next player gets a new session.
@@ -34,9 +47,7 @@ docker-compose up -d --build
 
 API runs on `http://localhost:8080`.
 
-Swagger UI is available at [http://localhost:8080](http://localhost:8080) — you can browse and test all endpoints in the browser.
-
-
+Swagger UI is available at [http://localhost:8080](http://localhost:8080).
 
 ### Without Docker
 
@@ -45,28 +56,47 @@ dotnet restore
 dotnet run --project src/MatchmakingService.Api/MatchmakingService.Api.csproj
 ```
 
+### Current limitations for horizontal scaling
+
+The current implementation uses in-memory storage, so each pod has its own queue and sessions. For production with multiple replicas:
+
+| Concern | Solution |
+|---|---|
+| Shared state | Redis for queue and sessions |
+| Single worker | Distributed lock so only one pod processes the queue |
+| Persistence | PostgreSQL or similiar for data that we need to persist |
+| Monitoring | Some kind of monetoring for cluster
+
 ## Endpoints
 
 | Method | Endpoint | What it does |
 |---|---|---|
-| `GET` | `/matchmaking/ping` | Ping for getting players latency |
+| `GET` | `/matchmaking/ping` | Health check / latency measurement |
 | `POST` | `/matchmaking/queue` | Add player to queue |
 | `DELETE` | `/matchmaking/queue/{playerId}` | Remove player from queue |
 | `POST` | `/matchmaking/join-or-queue` | Try to join a running session, otherwise queue |
-| `GET` | `/matchmaking/sessions` | List all sessions |
+| `GET` | `/matchmaking/sessions` | List all sessions, could be used in admin tool |
+| `GET` | `/matchmaking/sessions?gameId=X` | List sessions for a specific game, could be used in admin tool |
 | `GET` | `/matchmaking/status/{playerId}` | Check where a player is |
+
+### Error handling
+
+| Scenario | Response |
+|---|---|
+| Missing/invalid fields | `400 Bad Request` (via data annotations) |
+| Player already in queue or session | `409 Conflict` |
+| Dequeue player not in queue | `404 Not Found` |
+| Empty playerId on status/dequeue | `400 Bad Request` |
+| Unknown player status | `200 OK` with `"status": "unknown"` |
+| Unexpected server error | `500` with JSON error message |
 
 ### Quick test
 
 ```bash
-# Add four players
+# Add players to different games
 curl -X POST http://localhost:8080/matchmaking/queue \
   -H "Content-Type: application/json" \
   -d '{"playerId":"player1","gameId":"battle-royale","latencyMs":50}'
-
-curl -X POST http://localhost:8080/matchmaking/queue \
-  -H "Content-Type: application/json" \
-  -d '{"playerId":"player3","gameId":"racing","latencyMs":60}'
 
 curl -X POST http://localhost:8080/matchmaking/queue \
   -H "Content-Type: application/json" \
@@ -74,70 +104,55 @@ curl -X POST http://localhost:8080/matchmaking/queue \
 
 curl -X POST http://localhost:8080/matchmaking/queue \
   -H "Content-Type: application/json" \
-  -d '{"playerId":"player4","latencyMs":35}'
+  -d '{"playerId":"player3","gameId":"racing","latencyMs":60}'
 
-# Wait a few seconds for the worker to run, then check
+curl -X POST http://localhost:8080/matchmaking/queue \
+  -H "Content-Type: application/json" \
+  -d '{"playerId":"player4","gameId":"battle-royale","latencyMs":35}'
+
+# Wait a second for the worker to run, then check
 curl http://localhost:8080/matchmaking/status/player1
 
-# Get Gamesession for specific game
+# Get sessions for a specific game
 curl http://localhost:8080/matchmaking/sessions?gameId=battle-royale
 
-# Get all gamesessions
+# Get all sessions
 curl http://localhost:8080/matchmaking/sessions
 ```
 
 ### Response examples
 
-Waiting in queue:
+Player status responses always return the same shape:
+
 ```json
-{ "status": "waiting", "message": "In queue, waiting for match" }
+// unknown — player not found
+{ "status": "unknown", "sessionId": null, "players": null, "playerCount": 0, "maxPlayers": 0 }
+
+// queued — in queue, waiting for matchmaking
+{ "status": "queued", "sessionId": null, "players": null, "playerCount": 0, "maxPlayers": 0 }
+
+// lobby — in session, waiting for more players
+{ "status": "lobby", "sessionId": "abc-123", "players": ["p1","p2"], "playerCount": 2, "maxPlayers": 10 }
+
+// started — game is running
+{ "status": "started", "sessionId": "abc-123", "players": ["p1","p2","p3","p4"], "playerCount": 4, "maxPlayers": 10 }
+
+// full — session is full
+{ "status": "full", "sessionId": "abc-123", "players": ["p1","...","p10"], "playerCount": 10, "maxPlayers": 10 }
 ```
 
-In a lobby:
-```json
-{ "status": "lobby", "sessionId": "abc-123", "playerCount": 2, "maxPlayers": 10 }
-```
-
-Game started:
-```json
-{ "status": "started", "sessionId": "abc-123", "players": ["player1","player2","player3","player4"], "playerCount": 4, "maxPlayers": 10 }
-```
 
 ## Tests
 
 ```bash
+# Run all tests 
 dotnet test
 ```
 
-There are unit tests for the service logic and controller, plus integration tests that run against the Docker container.
+- **Unit tests** — matchmaking logic (service) and controller with mocked dependencies
+- **Integration tests** — run against the Docker container
+- **Load tests** — NBomber-based, Results are saved to `~/Desktop/load-results/`.
 
-### Load testing
-
-Load tests use [NBomber](https://nbomber.com/) and live in the test project. They simulate concurrent players queueing and checking status.
-
-To run them, make sure the container is up first:
-
-```bash
-docker-compose up -d --build
-dotnet test --filter "LoadTest"
-```
-
-Two scenarios:
-
-- **Queue_ShouldHandle100ConcurrentPlayers** — ramps from 10 to 50 requests/sec over 35 seconds
-- **FullFlow_ShouldHandleLoad** — 20 queue requests/sec + 30 status checks/sec for 30 seconds
-
-NBomber generates an HTML report after each run. You can find it at:
-
-```
-~/Desktop/load-results/
-```
-
-Open it with:
-
-```bash
-open ~/Desktop/load-results/*.html
-```
 
 ## Project layout
 
@@ -165,22 +180,27 @@ tests/
 
 ## Why I made certain choices
 
-**ConcurrentDictionary for the queue** — gives O(1) lookups and prevents the same player from being added twice. Thread-safe without external locking.
+**Dictionary + lock instead of ConcurrentDictionary** — all operations need to be atomic across multiple dictionaries (e.g. adding a player to a session and updating the session map). A single lock is simpler and safer than coordinating multiple concurrent collections.
 
-**Background worker instead of matching on request** — keeps the API fast. The matching logic can take its time without blocking the caller.
+**Four dictionaries for O(1) lookups everywhere** — `_queue` for queued players, `_sessionsById` for session lookup, `_playerSessionMap` for player → session mapping, `_openSessionByGame` for finding the current open session per game/bracket. No scanning.
 
-**Scoring: `waitTime - (latencyMs * 0.01)`** — players who have waited longer get priority. Low-latency players get a small bonus since they'll have a better experience.
+**Latency brackets for matchmaking** — players are grouped by latency range so similar-quality connections play together. Within each bracket, longest-waiting players are placed first.
 
-**Lobby → Started → Full** — lets sessions grow over time instead of requiring a fixed number of players upfront. Feels more natural for drop-in style games.
+**Background worker instead of matching on request** — keeps the API fast. The matching logic runs every 500ms without blocking the caller.
+
+**Data annotations for input validation** — `[Required]`, `[Range]` on the model. `[ApiController]` handles 400 responses automatically — no manual validation needed in the controller.
+
+**Lobby → Started → Full** — lets sessions grow over time instead of requiring a fixed number of players upfront.
 
 ## Things I'd add with more time
 
-- Real-time notifications via WebSockets instead of polling
-- Redis for session storage so multiple instances can share state
+- Redis for shared state across multiple pods
+- WebSocket notifications instead of polling
 - Rate limiting to prevent queue spam
+- Session cleanup for inactive sessions
+- Expanding latency tolerance based on wait time (strict at first, relaxes over time)
 
-
-##ASSIGNMENT
+## Assignment
 Make your own matchmaking service!
 Design and develop a custom matchmaking service using
 C# to create a scalable REST architecture capable of
@@ -194,7 +214,7 @@ a factor).
 - (Optional): Allow players to join a session that has
 already started.
 
-##GOALS
+## GOALS
 As a game server programmer, we encourage you to
 showcase your best work!
 -  Prioritize the architecture and apply best code practices

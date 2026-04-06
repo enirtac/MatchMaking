@@ -111,14 +111,24 @@ namespace MatchmakingService.Tests.Services
         [Fact]
         public void RunMatchmaking_With11Players_ShouldCreateFullAndLobby()
         {
-            EnqueuePlayers(11);
+            for (int i = 0; i < 11; i++)
+            {
+                _service.Enqueue(new PlayerQueueEntry
+                {
+                    PlayerId = $"player{i}",
+                    GameId = "TestGame",
+                    LatencyMs = 50 // samma bracket
+                });
+            }
+
             _service.RunMatchmaking();
 
-            _service.GetSessions().Should().HaveCount(2);
-            _service.GetSessions()[0].Status.Should().Be(SessionStatus.Full);
-            _service.GetSessions()[0].Players.Should().HaveCount(10);
-            _service.GetSessions()[1].Status.Should().Be(SessionStatus.Lobby);
-            _service.GetSessions()[1].Players.Should().HaveCount(1);
+            var sessions = _service.GetSessions();
+            sessions.Should().HaveCount(2);
+            sessions.Should().ContainSingle(s => s.Status == SessionStatus.Full);
+            sessions.Should().ContainSingle(s => s.Status == SessionStatus.Lobby);
+            sessions.First(s => s.Status == SessionStatus.Full).Players.Should().HaveCount(10);
+            sessions.First(s => s.Status == SessionStatus.Lobby).Players.Should().HaveCount(1);
         }
 
         // === RunMatchmaking - Fill Existing Session ===
@@ -147,32 +157,80 @@ namespace MatchmakingService.Tests.Services
             _service.GetSessions().Should().HaveCount(1);
         }
 
-        // === RunMatchmaking - Scoring ===
+        // === RunMatchmaking - Latency Grouping ===
 
         [Fact]
-        public void RunMatchmaking_ShouldPrioritizeLongWaitAndLowLatency()
+        public void RunMatchmaking_ShouldGroupPlayersByLatencyBracket()
+        {
+            // Bracket 0: 0-49ms
+            _service.Enqueue(CreatePlayer("low1", latency: 20));
+            _service.Enqueue(CreatePlayer("low2", latency: 30));
+            _service.Enqueue(CreatePlayer("low3", latency: 40));
+            _service.Enqueue(CreatePlayer("low4", latency: 25));
+
+            // Bracket 2: 100-149ms
+            _service.Enqueue(CreatePlayer("high1", latency: 120));
+            _service.Enqueue(CreatePlayer("high2", latency: 130));
+            _service.Enqueue(CreatePlayer("high3", latency: 110));
+            _service.Enqueue(CreatePlayer("high4", latency: 140));
+
+            _service.RunMatchmaking();
+
+            var sessions = _service.GetSessions();
+            sessions.Should().HaveCount(2);
+
+            var lowSession = sessions.First(s => s.Players.Any(p => p.PlayerId == "low1"));
+            var highSession = sessions.First(s => s.Players.Any(p => p.PlayerId == "high1"));
+
+            lowSession.Players.Should().HaveCount(4);
+            lowSession.Players.Should().OnlyContain(p => p.LatencyMs < 50);
+
+            highSession.Players.Should().HaveCount(4);
+            highSession.Players.Should().OnlyContain(p => p.LatencyMs >= 100 && p.LatencyMs < 150);
+        }
+
+        [Fact]
+        public void RunMatchmaking_DifferentLatencies_ShouldNotMixInSameSession()
+        {
+            _service.Enqueue(CreatePlayer("fast", latency: 10));
+            _service.Enqueue(CreatePlayer("slow", latency: 200));
+
+            _service.RunMatchmaking();
+
+            var sessions = _service.GetSessions();
+            sessions.Should().HaveCount(2);
+            sessions.Should().NotContain(s =>
+                s.Players.Any(p => p.LatencyMs < 50) &&
+                s.Players.Any(p => p.LatencyMs >= 150));
+        }
+
+        [Fact]
+        public void RunMatchmaking_SameLatencyBracket_ShouldPrioritizeWaitTime()
         {
             var oldPlayer = new PlayerQueueEntry
             {
                 PlayerId = "old_player",
-                LatencyMs = 10,
+                LatencyMs = 30,
                 EnqueuedAt = DateTime.UtcNow.AddMinutes(-5),
                 GameId = "TestGame"
             };
             var newPlayer = new PlayerQueueEntry
             {
                 PlayerId = "new_player",
-                LatencyMs = 200,
+                LatencyMs = 40,
                 EnqueuedAt = DateTime.UtcNow,
                 GameId = "TestGame"
             };
 
-            _service.Enqueue(oldPlayer);
             _service.Enqueue(newPlayer);
+            _service.Enqueue(oldPlayer);
             _service.RunMatchmaking();
 
             var session = _service.GetSessions().First();
-            session.Players.Should().Contain(p => p.PlayerId == "old_player");
+            var players = session.Players.ToList();
+            var oldIndex = players.FindIndex(p => p.PlayerId == "old_player");
+            var newIndex = players.FindIndex(p => p.PlayerId == "new_player");
+            oldIndex.Should().BeLessThan(newIndex, "older player should be added first");
         }
 
         // === TryJoinExistingSession ===
@@ -258,6 +316,27 @@ namespace MatchmakingService.Tests.Services
             _service.Enqueue(CreatePlayer("queued_player"));
             var result = _service.GetPlayerSession("queued_player");
             result.Should().BeNull();
+        }
+
+        // === IsPlayerInQueue ===
+
+        [Fact]
+        public void IsPlayerInQueue_WhenQueued_ShouldReturnTrue()
+        {
+            _service.Enqueue(CreatePlayer("player1"));
+            _service.IsPlayerInQueue("player1").Should().BeTrue();
+        }
+
+        [Fact]
+        public void IsPlayerInQueue_WhenNotQueued_ShouldReturnFalse()
+        {
+            _service.IsPlayerInQueue("nonexistent").Should().BeFalse();
+        }
+
+        [Fact]
+        public void IsPlayerInQueue_WithEmptyString_ShouldReturnFalse()
+        {
+            _service.IsPlayerInQueue("").Should().BeFalse();
         }
 
         // === GetSessions ===

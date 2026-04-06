@@ -8,63 +8,58 @@ namespace MatchmakingService.Application.Services
 {
     public class MatchmakingService : IMatchmakingService
     {
-        private readonly ConcurrentDictionary<string, PlayerQueueEntry> _queue = new();
-        private readonly List<GameSession> _sessions = new();
-        private readonly object _lock = new();
+        private readonly Dictionary<string, PlayerQueueEntry> _queue = new();
+        private readonly Dictionary<string, string> _playerSessionMap = new();
+        //Dictionary for sessions by id
+        private readonly Dictionary<string, GameSession> _sessionsById = new();
+        //Dictionary for open sessions by game
+        private readonly Dictionary<string, GameSession> _openSessionByGame = new();
 
-        private const int MinPlayersToStart = 4;
-        private const int MaxPlayersPerSession = 10;
+
+        private readonly object _lock = new();
 
         public void Enqueue(PlayerQueueEntry player)
         {
-            _queue[player.PlayerId] = player;
+            lock (_lock)
+            {
+                _queue[player.PlayerId] = player;
+            }
         }
 
         public void Dequeue(string playerId)
         {
-            _queue.TryRemove(playerId, out _);
+            lock (_lock)
+            {
+                _queue.Remove(playerId);
+            }
         }
 
         public void RunMatchmaking()
         {
-            var players = new List<PlayerQueueEntry>();
-            while (_queue.Count > 0)
-            {
-                var key = _queue.Keys.FirstOrDefault();
-                if (key != null && _queue.TryRemove(key, out var player))
-                {
-                    players.Add(player);
-                }
-            }
-
-            // Group by game so players only match within the same game
-            var grouped = players.GroupBy(p => p.GameId);
-
             lock (_lock)
             {
-                foreach (var group in grouped)
+                var players = _queue.Values.ToList();
+                _queue.Clear();
+                if (players.Count == 0) return;
+                foreach (var group in players.GroupBy(p => p.GameId))
                 {
-                    var sorted = group
-                        .OrderByDescending(p => Score(p))
-                        .ToList();
 
-                    foreach (var player in sorted)
+                    var latencyGroups = group
+                        .GroupBy(p => GetLatencyScore(p.LatencyMs))
+                        .OrderBy(g => g.Key);
+
+                    foreach (var latencyGroup in latencyGroups)
                     {
-                        var session = _sessions
-                            .FirstOrDefault(s => s.GameId == player.GameId && s.Status != SessionStatus.Full);
-
-                        if (session != null)
+                        foreach (var player in latencyGroup.OrderBy(p => p.EnqueuedAt))
                         {
-                            session.Players.Add(player);
-                        }
-                        else
-                        {
-                            session = new GameSession { GameId = player.GameId };
-                            session.Players.Add(player);
-                            _sessions.Add(session);
-                        }
 
-                        UpdateSessionStatus(session);
+                            var sessionKey = $"{player.GameId}_{latencyGroup.Key}";
+                            var session = GetOrCreateOpenSession(sessionKey, player.GameId);
+                            session.Players.Add(player);
+                            _playerSessionMap[player.PlayerId] = session.SessionId;
+                            UpdateSessionStatus(session);
+
+                        }
                     }
                 }
             }
@@ -73,13 +68,22 @@ namespace MatchmakingService.Application.Services
         {
             lock (_lock)
             {
-                var session = _sessions
-                    .FirstOrDefault(s => s.GameId == player.GameId && s.Status == SessionStatus.Started);
+                var sessionKey = $"{player.GameId}_{GetLatencyScore(player.LatencyMs)}";
 
-                if (session == null) return null;
+                if (!_openSessionByGame.TryGetValue(sessionKey, out var session))
+                    return null;
 
+                if (session.Status != SessionStatus.Started)
+                    return null;
+
+                var alreadyInSession = session.Players.Any(p => p.PlayerId == player.PlayerId);
+
+                if (alreadyInSession)
+                    return session;
                 session.Players.Add(player);
+                _playerSessionMap[player.PlayerId] = session.SessionId;
                 UpdateSessionStatus(session);
+
                 return session;
             }
         }
@@ -88,37 +92,61 @@ namespace MatchmakingService.Application.Services
         {
             lock (_lock)
             {
-                return _sessions.FirstOrDefault(s =>
-                    s.Players.Any(p => p.PlayerId == playerId));
+                if (!_playerSessionMap.TryGetValue(playerId, out var sessionId))
+                    return null;
+
+                _sessionsById.TryGetValue(sessionId, out var session);
+                return session;
             }
         }
-
         public List<GameSession> GetSessions()
         {
             lock (_lock)
             {
-                return _sessions.ToList();
+                return _sessionsById.Values.ToList();
             }
         }
 
         private void UpdateSessionStatus(GameSession session)
         {
-            if (session.Players.Count >= MaxPlayersPerSession)
-                session.Status = SessionStatus.Full;
-            else if (session.Players.Count >= MinPlayersToStart)
-                session.Status = SessionStatus.Started;
-            else
-                session.Status = SessionStatus.Lobby;
-        }
-        private static double Score(PlayerQueueEntry player)
-        {
-            var waitTime = (DateTime.UtcNow - player.EnqueuedAt).TotalSeconds;
-            return waitTime - (player.LatencyMs * 0.01);
-        }
+            session.Status = session.Players.Count >= session.MaxPlayersPerSession ? SessionStatus.Full
+                             : session.Players.Count >= session.MinPlayersToStart ? SessionStatus.Started
+                             : SessionStatus.Lobby;
 
+            if (session.Status == SessionStatus.Full)
+                _openSessionByGame.Remove(session.SessionKey);
+        }
+        private static int GetLatencyScore(int latencyMs) => latencyMs switch
+        {
+            < 50 => 0,    // 0–49ms   (very good)
+            < 100 => 1,   // 50–99ms  (good)
+            < 150 => 2,   // 100–149ms (ok)
+            _ => 3         // 150ms+   (poor)
+        };
+
+        private GameSession GetOrCreateOpenSession(string sessionKey, string gameId)
+        {
+            if (_openSessionByGame.TryGetValue(sessionKey, out var session) && session.CanJoin)
+                return session;
+
+            var newSession = new GameSession { GameId = gameId, SessionKey = sessionKey };
+            _sessionsById[newSession.SessionId] = newSession;
+            _openSessionByGame[sessionKey] = newSession;
+            return newSession;
+        }
         public bool HasPlayersInQueue()
         {
-            return !_queue.IsEmpty;
+            lock (_lock)
+            {
+                return _queue.Count > 0;
+            }
+        }
+        public bool IsPlayerInQueue(string playerId)
+        {
+            lock (_lock)
+            {
+                return _queue.ContainsKey(playerId);
+            }
         }
     }
 }

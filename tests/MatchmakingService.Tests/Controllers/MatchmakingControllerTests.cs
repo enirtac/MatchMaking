@@ -32,12 +32,24 @@ namespace MatchmakingService.Tests.Controllers
         }
 
         [Fact]
-        public void Dequeue_ShouldCallServiceAndReturnOk()
+        public void Dequeue_ShouldCallServiceAndReturnNoContent()
         {
+            _serviceMock.Setup(s => s.IsPlayerInQueue("player1")).Returns(true);
+
             var result = _controller.Dequeue("player1");
 
-            result.Should().BeOfType<OkObjectResult>();
+            result.Should().BeOfType<NoContentResult>();
             _serviceMock.Verify(s => s.Dequeue("player1"), Times.Once);
+        }
+        [Fact]
+        public void Dequeue_WhenNotInQueue_ShouldReturnNotFound()
+        {
+            _serviceMock.Setup(s => s.IsPlayerInQueue("player1")).Returns(false);
+
+            var result = _controller.Dequeue("player1");
+
+            result.Should().BeOfType<NotFoundObjectResult>();
+            _serviceMock.Verify(s => s.Dequeue(It.IsAny<string>()), Times.Never);
         }
 
         [Fact]
@@ -116,47 +128,40 @@ namespace MatchmakingService.Tests.Controllers
         }
 
         [Fact]
-        public void GetPlayerStatus_WhenWaiting_ShouldReturnWaiting()
+        public void GetPlayerStatus_WhenInQueue_ShouldReturnQueued()
         {
             _serviceMock.Setup(s => s.GetPlayerSession("player1")).Returns((GameSession?)null);
+            _serviceMock.Setup(s => s.IsPlayerInQueue("player1")).Returns(true);
 
             var result = _controller.GetPlayerStatus("player1");
 
             var okResult = result.Should().BeOfType<OkObjectResult>().Subject;
-            okResult.Value.Should().BeEquivalentTo(new { status = "waiting" });
+            okResult.Value.Should().BeEquivalentTo(new
+            {
+                status = "queued",
+                sessionId = (string?)null,
+                players = (IEnumerable<string>?)null,
+                playerCount = 0,
+                maxPlayers = 0
+            });
         }
         [Fact]
-        public void Enqueue_WithMissingGameId_ShouldReturnBadRequest()
+        public void GetPlayerStatus_WhenUnknown_ShouldReturnUnknown()
         {
-            var player = new PlayerQueueEntry { PlayerId = "player1", GameId = "", LatencyMs = 50 };
+            _serviceMock.Setup(s => s.GetPlayerSession("player1")).Returns((GameSession?)null);
+            _serviceMock.Setup(s => s.IsPlayerInQueue("player1")).Returns(false);
 
-            var result = _controller.Enqueue(player);
+            var result = _controller.GetPlayerStatus("player1");
 
-            result.Should().BeOfType<BadRequestObjectResult>();
-            _serviceMock.Verify(s => s.Enqueue(It.IsAny<PlayerQueueEntry>()), Times.Never);
-        }
-
-        [Fact]
-        public void Enqueue_WithMissingPlayerId_ShouldReturnBadRequest()
-        {
-            var player = new PlayerQueueEntry { PlayerId = "", GameId = "TestGame", LatencyMs = 50 };
-
-            var result = _controller.Enqueue(player);
-
-            result.Should().BeOfType<BadRequestObjectResult>();
-            _serviceMock.Verify(s => s.Enqueue(It.IsAny<PlayerQueueEntry>()), Times.Never);
-        }
-
-        [Fact]
-        public void JoinOrQueue_WithMissingGameId_ShouldReturnBadRequest()
-        {
-            var player = new PlayerQueueEntry { PlayerId = "player1", GameId = "", LatencyMs = 50 };
-
-            var result = _controller.JoinOrQueue(player);
-
-            result.Should().BeOfType<BadRequestObjectResult>();
-            _serviceMock.Verify(s => s.TryJoinExistingSession(It.IsAny<PlayerQueueEntry>()), Times.Never);
-            _serviceMock.Verify(s => s.Enqueue(It.IsAny<PlayerQueueEntry>()), Times.Never);
+            var okResult = result.Should().BeOfType<OkObjectResult>().Subject;
+            okResult.Value.Should().BeEquivalentTo(new
+            {
+                status = "unknown",
+                sessionId = (string?)null,
+                players = (IEnumerable<string>?)null,
+                playerCount = 0,
+                maxPlayers = 0
+            });
         }
 
         [Fact]

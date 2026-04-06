@@ -9,6 +9,7 @@ namespace MatchmakingService.Application.Services
         void Dequeue(string playerId);
         void RunMatchmaking();
         bool HasPlayersInQueue();
+        bool IsPlayerInQueue(string playerId);
         GameSession? TryJoinExistingSession(PlayerQueueEntry player);
         List<GameSession> GetSessions();
         GameSession? GetPlayerSession(string playerId);

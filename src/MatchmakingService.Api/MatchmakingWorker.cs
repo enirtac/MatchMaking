@@ -14,11 +14,8 @@ public class MatchmakingWorker : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (_service.HasPlayersInQueue())
-            {
-                _service.RunMatchmaking();
-            }
-            await Task.Delay(1000, stoppingToken);
+            _service.RunMatchmaking();
+            await Task.Delay(500, stoppingToken);
         }
     }
 }

@@ -19,23 +19,23 @@ namespace MatchmakingService.Api.Controllers
         [HttpPost("queue")]
         public IActionResult Enqueue([FromBody] PlayerQueueEntry player)
         {
-            if (string.IsNullOrWhiteSpace(player.PlayerId) || string.IsNullOrWhiteSpace(player.GameId))
-                return BadRequest(new { error = "playerId and gameId are required" });
+            if (_service.IsPlayerInQueue(player.PlayerId) || _service.GetPlayerSession(player.PlayerId) != null)
+                return Conflict(new { error = "Player is already in queue or session", playerId = player.PlayerId });
 
             _service.Enqueue(player);
-            return Ok(new { message = "Player queued successfully", playerId = player.PlayerId });
+            return Ok(new { status = "queued", message = "Player queued successfully", playerId = player.PlayerId });
         }
         [HttpPost("join-or-queue")]
         public IActionResult JoinOrQueue([FromBody] PlayerQueueEntry player)
         {
-            if (string.IsNullOrWhiteSpace(player.PlayerId) || string.IsNullOrWhiteSpace(player.GameId))
-                return BadRequest(new { error = "playerId and gameId are required" });
+            if (_service.IsPlayerInQueue(player.PlayerId) || _service.GetPlayerSession(player.PlayerId) != null)
+                return Conflict(new { error = "Player is already in queue or session", playerId = player.PlayerId });
 
             var session = _service.TryJoinExistingSession(player);
 
             if (session != null)
             {
-                return Ok(new { status = "joined", sessionId = session.SessionId });
+                return Ok(new { status = "joined", sessionId = session.SessionId, playerId = player.PlayerId });
             }
 
             _service.Enqueue(player);
@@ -43,12 +43,16 @@ namespace MatchmakingService.Api.Controllers
             return Ok(new { status = "queued", playerId = player.PlayerId });
         }
         [HttpDelete("queue/{playerId}")]
-        public IActionResult Dequeue(string playerId)
+        public IActionResult Dequeue([FromRoute] string playerId)
         {
-            if (playerId == string.Empty)
-                return BadRequest(new { message = "PlayerId is required" });
+            if (string.IsNullOrWhiteSpace(playerId))
+                return BadRequest(new { error = "playerId is required" });
+
+            if (!_service.IsPlayerInQueue(playerId))
+                return NotFound(new { error = "Player not found in queue", playerId });
+
             _service.Dequeue(playerId);
-            return Ok(new { message = "Player dequeued successfully", playerId });
+            return NoContent();
         }
 
         [HttpGet("sessions")]
@@ -65,26 +69,32 @@ namespace MatchmakingService.Api.Controllers
         [HttpGet("status/{playerId}")]
         public IActionResult GetPlayerStatus(string playerId)
         {
-            if (playerId == string.Empty)
-                return BadRequest(new { message = "PlayerId is required" });
-            var session = _service.GetPlayerSession(playerId);
+            if (string.IsNullOrWhiteSpace(playerId))
+                return BadRequest(new { error = "playerId is required" });
 
-            if (session == null)
-                return Ok(new { status = "waiting", message = "In queue, waiting for match" });
+            var session = _service.GetPlayerSession(playerId);
+            var inQueue = _service.IsPlayerInQueue(playerId);
+
+            var status = session != null
+                ? session.Status.ToString().ToLowerInvariant()
+                : inQueue ? "queued" : "unknown";
 
             return Ok(new
             {
-                status = session.Status.ToString().ToLower(),
-                sessionId = session.SessionId,
-                players = session.Players.Select(p => p.PlayerId),
-                playerCount = session.Players.Count,
-                maxPlayers = session.MaxPlayers
+                status,
+                sessionId = session?.SessionId,
+                players = session?.Players.Select(p => p.PlayerId),
+                playerCount = session?.Players.Count ?? 0,
+                maxPlayers = session?.MaxPlayersPerSession ?? 0
             });
         }
+
         [HttpGet("ping")]
         public IActionResult Ping()
         {
             return Ok(new { status = "pong", timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
         }
     }
+
+
 }
